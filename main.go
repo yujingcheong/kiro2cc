@@ -71,14 +71,7 @@ func getTokenFilePath() string {
 		os.Exit(1)
 	}
 
-	var tokenPath string
-	if runtime.GOOS == "windows" {
-		tokenPath = filepath.Join(homeDir, ".aws", "sso", "cache", "kiro-auth-token.json")
-	} else {
-		tokenPath = filepath.Join(homeDir, ".aws", "sso", "cache", "kiro-auth-token.json")
-	}
-
-	return tokenPath
+	return filepath.Join(homeDir, ".aws", "sso", "cache", "kiro-auth-token.json")
 }
 
 // readToken 读取并显示token信息
