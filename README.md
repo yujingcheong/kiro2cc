@@ -4,7 +4,7 @@
 
 ## 功能
 
--   读取用户目录下的 `.aws/sso/cache/kiro-auth-token.json` 文件
+-   读取用户目录下的 `.aws/sso/cache/kiro2cc-token.json` 文件
 -   使用refresh token刷新access token
 -   导出环境变量供其他工具使用
 -   启动HTTP服务器作为Anthropic Claude API的代理
@@ -12,7 +12,7 @@
 ## 编译
 
 ```bash
-go build -o kiro-auth main.go
+go build -o kiro2cc main.go
 ```
 
 ## 使用方法
@@ -20,33 +20,33 @@ go build -o kiro-auth main.go
 ### 1. 读取token信息
 
 ```bash
-./kiro-auth read
+./kiro2cc read
 ```
 
 ### 2. 刷新token
 
 ```bash
-./kiro-auth refresh
+./kiro2cc refresh
 ```
 
 ### 3. 导出环境变量
 
 ```bash
 # Linux/macOS
-eval $(./kiro-auth export)
+eval $(./kiro2cc export)
 
 # Windows
-./kiro-auth export
+./kiro2cc export
 ```
 
 ### 4. 启动Anthropic API代理服务器
 
 ```bash
 # 使用默认端口8080
-./kiro-auth server
+./kiro2cc server
 
 # 指定自定义端口
-./kiro-auth server 9000
+./kiro2cc server 9000
 ```
 
 ## 代理服务器使用方法

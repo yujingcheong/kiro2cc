@@ -35,10 +35,10 @@ type RefreshResponse struct {
 func main() {
 	if len(os.Args) < 2 {
 		fmt.Println("用法:")
-		fmt.Println("  kiro-auth read    - 读取并显示token")
-		fmt.Println("  kiro-auth refresh - 刷新token")
-		fmt.Println("  kiro-auth export  - 导出环境变量")
-		fmt.Println("  kiro-auth server [port] - 启动Anthropic API代理服务器")
+		fmt.Println("  kiro2cc read    - 读取并显示token")
+		fmt.Println("  kiro2cc refresh - 刷新token")
+		fmt.Println("  kiro2cc export  - 导出环境变量")
+		fmt.Println("  kiro2cc server [port] - 启动Anthropic API代理服务器")
 		os.Exit(1)
 	}
 
@@ -73,9 +73,9 @@ func getTokenFilePath() string {
 
 	var tokenPath string
 	if runtime.GOOS == "windows" {
-		tokenPath = filepath.Join(homeDir, ".aws", "sso", "cache", "kiro-auth-token.json")
+		tokenPath = filepath.Join(homeDir, ".aws", "sso", "cache", "kiro2cc-token.json")
 	} else {
-		tokenPath = filepath.Join(homeDir, ".aws", "sso", "cache", "kiro-auth-token.json")
+		tokenPath = filepath.Join(homeDir, ".aws", "sso", "cache", "kiro2cc-token.json")
 	}
 
 	return tokenPath
