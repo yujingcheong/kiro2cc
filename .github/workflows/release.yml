@@ -49,7 +49,11 @@ jobs:
             - name: Compress binary with UPX
               shell: bash
               run: |
-                  upx --best --lzma ${{ matrix.artifact_name }}
+                  if [ "${{ runner.os }}" != "macOS" ]; then
+                    upx --best --lzma ${{ matrix.artifact_name }}
+                  else
+                    echo "Skipping UPX compression for macOS as it's not supported"
+                  fi
 
             - name: Extract version from tag
               id: get_version
