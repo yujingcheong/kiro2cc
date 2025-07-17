@@ -1,0 +1,46 @@
+name: Build and Release
+
+on:
+    release:
+        types: [created]
+
+jobs:
+    build:
+        name: Build and Upload Release Assets
+        runs-on: ${{ matrix.os }}
+        strategy:
+            matrix:
+                os: [ubuntu-latest, windows-latest, macos-latest]
+                include:
+                    - os: ubuntu-latest
+                      artifact_name: kiro2cc
+                      asset_name: kiro2cc-linux-amd64
+                    - os: windows-latest
+                      artifact_name: kiro2cc.exe
+                      asset_name: kiro2cc-windows-amd64.exe
+                    - os: macos-latest
+                      artifact_name: kiro2cc
+                      asset_name: kiro2cc-macos-amd64
+
+        steps:
+            - name: Checkout code
+              uses: actions/checkout@v3
+
+            - name: Set up Go
+              uses: actions/setup-go@v4
+              with:
+                  go-version: '1.23.3'
+                  check-latest: true
+
+            - name: Build
+              run: go build -v -o ${{ matrix.artifact_name }} .
+
+            - name: Upload Release Asset
+              uses: actions/upload-release-asset@v1
+              env:
+                  GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+              with:
+                  upload_url: ${{ github.event.release.upload_url }}
+                  asset_path: ./${{ matrix.artifact_name }}
+                  asset_name: ${{ matrix.asset_name }}
+                  asset_content_type: application/octet-stream

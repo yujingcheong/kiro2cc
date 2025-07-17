@@ -15,6 +15,13 @@
 go build -o kiro2cc main.go
 ```
 
+## 自动构建
+
+本项目使用GitHub Actions进行自动构建：
+
+-   当创建新的GitHub Release时，会自动构建Windows、Linux和macOS版本的可执行文件并上传到Release页面
+-   当推送代码到main分支或创建Pull Request时，会自动运行测试
+
 ## 使用方法
 
 ### 1. 读取token信息
@@ -79,8 +86,8 @@ curl -X POST http://localhost:8080 \
 
 工具会设置以下环境变量：
 
--   `ANTHROPIC_BASE_URL`: https://codewhisperer.us-east-1.amazonaws.com/generateAssistantResponse
--   `ANTHROPIC_API_KEY`: 当前的access token
+-   [] `ANTHROPIC_BASE_URL`: https://codewhisperer.us-east-1.amazonaws.com/generateAssistantResponse
+-   [] `ANTHROPIC_API_KEY`: 当前的access token
 
 ## 跨平台支持
 
