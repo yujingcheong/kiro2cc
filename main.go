@@ -73,9 +73,9 @@ func getTokenFilePath() string {
 
 	var tokenPath string
 	if runtime.GOOS == "windows" {
-		tokenPath = filepath.Join(homeDir, ".aws", "sso", "cache", "kiro2cc-token.json")
+		tokenPath = filepath.Join(homeDir, ".aws", "sso", "cache", "kiro-auth-token.json")
 	} else {
-		tokenPath = filepath.Join(homeDir, ".aws", "sso", "cache", "kiro2cc-token.json")
+		tokenPath = filepath.Join(homeDir, ".aws", "sso", "cache", "kiro-auth-token.json")
 	}
 
 	return tokenPath
