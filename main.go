@@ -2,15 +2,17 @@ package main
 
 import (
 	"bytes"
+	"crypto/rand"
 	"encoding/json"
 	"fmt"
 	"io"
-	"log"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
+	"time"
 )
 
 // TokenData 表示token文件的结构
@@ -30,6 +32,116 @@ type RefreshResponse struct {
 	AccessToken  string `json:"accessToken"`
 	RefreshToken string `json:"refreshToken"`
 	ExpiresAt    string `json:"expiresAt,omitempty"`
+}
+
+// AnthropicRequest 表示 Anthropic API 的请求结构
+type AnthropicRequest struct {
+	Model     string                    `json:"model"`
+	MaxTokens int                       `json:"max_tokens"`
+	Messages  []AnthropicRequestMessage `json:"messages"`
+	Stream    bool                      `json:"stream"`
+}
+
+// AnthropicStreamResponse 表示 Anthropic 流式响应的结构
+type AnthropicStreamResponse struct {
+	Type         string `json:"type"`
+	Index        int    `json:"index"`
+	ContentDelta struct {
+		Text string `json:"text"`
+		Type string `json:"type"`
+	} `json:"delta,omitempty"`
+	Content []struct {
+		Text string `json:"text"`
+		Type string `json:"type"`
+	} `json:"content,omitempty"`
+	StopReason   string `json:"stop_reason,omitempty"`
+	StopSequence string `json:"stop_sequence,omitempty"`
+	Usage        struct {
+		InputTokens  int `json:"input_tokens"`
+		OutputTokens int `json:"output_tokens"`
+	} `json:"usage,omitempty"`
+}
+
+// AnthropicRequestMessage 表示 Anthropic API 的消息结构
+type AnthropicRequestMessage struct {
+	Role    string `json:"role"`
+	Content any    `json:"content"` // 可以是 string 或 []ContentBlock
+}
+
+// ContentBlock 表示消息内容块的结构
+type ContentBlock struct {
+	Type string `json:"type"`
+	Text string `json:"text"`
+}
+
+// getMessageContent 从消息中提取文本内容
+func getMessageContent(content any) string {
+	switch v := content.(type) {
+	case string:
+		return v
+	case []any:
+		var texts []string
+		for _, block := range v {
+			if blockMap, ok := block.(map[string]any); ok {
+				if text, ok := blockMap["text"].(string); ok {
+					texts = append(texts, text)
+				}
+			}
+		}
+		return strings.Join(texts, "\n")
+	default:
+		return ""
+	}
+}
+
+// CodeWhispererRequest 表示 CodeWhisperer API 的请求结构
+type CodeWhispererRequest struct {
+	ConversationState struct {
+		ChatTriggerType string `json:"chatTriggerType"`
+		ConversationId  string `json:"conversationId"`
+		CurrentMessage  struct {
+			UserInputMessage struct {
+				Content                 string         `json:"content"`
+				ModelId                 string         `json:"modelId"`
+				Origin                  string         `json:"origin"`
+				UserInputMessageContext map[string]any `json:"userInputMessageContext"`
+			} `json:"userInputMessage"`
+		} `json:"currentMessage"`
+		History []struct {
+			UserInputMessage struct {
+				Content string `json:"content"`
+				ModelId string `json:"modelId"`
+				Origin  string `json:"origin"`
+			} `json:"userInputMessage,omitempty"`
+			AssistantResponseMessage struct {
+				Content  string `json:"content"`
+				ToolUses []any  `json:"toolUses"`
+			} `json:"assistantResponseMessage,omitempty"`
+		} `json:"history"`
+	} `json:"conversationState"`
+	ProfileArn string `json:"profileArn"`
+}
+
+// CodeWhispererEvent 表示 CodeWhisperer 的事件响应
+type CodeWhispererEvent struct {
+	ContentType string `json:"content-type"`
+	MessageType string `json:"message-type"`
+	Content     string `json:"content"`
+	EventType   string `json:"event-type"`
+}
+
+var ModelMap = map[string]string{
+	"claude-sonnet-4-20250514":  "CLAUDE_SONNET_4_20250514_V1_0",
+	"claude-3-5-haiku-20241022": "CLAUDE_3_7_SONNET_20250219_V1_0",
+}
+
+// generateUUID generates a simple UUID v4
+func generateUUID() string {
+	b := make([]byte, 16)
+	rand.Read(b)
+	b[6] = (b[6] & 0x0f) | 0x40 // Version 4
+	b[8] = (b[8] & 0x3f) | 0x80 // Variant bits
+	return fmt.Sprintf("%x-%x-%x-%x-%x", b[0:4], b[4:6], b[6:8], b[8:10], b[10:])
 }
 
 func main() {
@@ -191,10 +303,10 @@ func exportEnvVars() {
 
 	// 根据操作系统输出不同格式的环境变量设置命令
 	if runtime.GOOS == "windows" {
-		fmt.Printf("set ANTHROPIC_BASE_URL=https://codewhisperer.us-east-1.amazonaws.com/generateAssistantResponse\n")
+		fmt.Printf("set ANTHROPIC_BASE_URL=https://localhost:8080")
 		fmt.Printf("set ANTHROPIC_API_KEY=%s\n", token.AccessToken)
 	} else {
-		fmt.Printf("export ANTHROPIC_BASE_URL=\"https://codewhisperer.us-east-1.amazonaws.com/generateAssistantResponse\"\n")
+		fmt.Printf("export ANTHROPIC_BASE_URL=https://localhost:8080")
 		fmt.Printf("export ANTHROPIC_API_KEY=\"%s\"\n", token.AccessToken)
 	}
 }
@@ -216,12 +328,41 @@ func getToken() (TokenData, error) {
 	return token, nil
 }
 
+// logMiddleware 记录所有HTTP请求的中间件
+func logMiddleware(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		startTime := time.Now()
+
+		fmt.Printf("\n=== 收到请求 ===\n")
+		fmt.Printf("时间: %s\n", startTime.Format("2006-01-02 15:04:05"))
+		fmt.Printf("请求方法: %s\n", r.Method)
+		fmt.Printf("请求路径: %s\n", r.URL.Path)
+		fmt.Printf("客户端IP: %s\n", r.RemoteAddr)
+		fmt.Printf("请求头:\n")
+		for name, values := range r.Header {
+			fmt.Printf("  %s: %s\n", name, strings.Join(values, ", "))
+		}
+
+		// 调用下一个处理器
+		next(w, r)
+
+		// 计算处理时间
+		duration := time.Since(startTime)
+		fmt.Printf("处理时间: %v\n", duration)
+		fmt.Printf("=== 请求结束 ===\n\n")
+	}
+}
+
 // startServer 启动HTTP代理服务器
 func startServer(port string) {
-	// 创建代理处理器
-	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+	// 创建路由器
+	mux := http.NewServeMux()
+
+	// 注册所有端点
+	mux.HandleFunc("/v1/messages", logMiddleware(func(w http.ResponseWriter, r *http.Request) {
 		// 只处理POST请求
 		if r.Method != http.MethodPost {
+			fmt.Printf("错误: 不支持的请求方法\n")
 			http.Error(w, "只支持POST请求", http.StatusMethodNotAllowed)
 			return
 		}
@@ -229,6 +370,7 @@ func startServer(port string) {
 		// 获取当前token
 		token, err := getToken()
 		if err != nil {
+			fmt.Printf("错误: 获取token失败: %v\n", err)
 			http.Error(w, fmt.Sprintf("获取token失败: %v", err), http.StatusInternalServerError)
 			return
 		}
@@ -236,75 +378,419 @@ func startServer(port string) {
 		// 读取请求体
 		body, err := io.ReadAll(r.Body)
 		if err != nil {
+			fmt.Printf("错误: 读取请求体失败: %v\n", err)
 			http.Error(w, fmt.Sprintf("读取请求体失败: %v", err), http.StatusInternalServerError)
 			return
 		}
 		defer r.Body.Close()
 
-		// 创建转发请求
-		proxyReq, err := http.NewRequest(
-			http.MethodPost,
-			"https://codewhisperer.us-east-1.amazonaws.com/generateAssistantResponse",
-			bytes.NewBuffer(body),
-		)
-		if err != nil {
-			http.Error(w, fmt.Sprintf("创建代理请求失败: %v", err), http.StatusInternalServerError)
+		fmt.Printf("Anthropic 请求体:\n%s\n", string(body))
+
+		// 解析 Anthropic 请求
+		var anthropicReq AnthropicRequest
+		if err := json.Unmarshal(body, &anthropicReq); err != nil {
+			fmt.Printf("错误: 解析请求体失败: %v\n", err)
+			http.Error(w, fmt.Sprintf("解析请求体失败: %v", err), http.StatusBadRequest)
 			return
 		}
 
-		// 复制原始请求的header
-		for name, values := range r.Header {
-			// 跳过Host和Authorization头
-			if strings.EqualFold(name, "Host") || strings.EqualFold(name, "Authorization") {
-				continue
-			}
-			for _, value := range values {
-				proxyReq.Header.Add(name, value)
-			}
-		}
-
-		// 设置Authorization头
-		proxyReq.Header.Set("Authorization", "Bearer "+token.AccessToken)
-
-		// 发送请求
-		client := &http.Client{}
-		resp, err := client.Do(proxyReq)
-		if err != nil {
-			http.Error(w, fmt.Sprintf("发送代理请求失败: %v", err), http.StatusInternalServerError)
+		// 如果是流式请求
+		if anthropicReq.Stream {
+			handleStreamRequest(w, anthropicReq, token.AccessToken)
 			return
 		}
-		defer resp.Body.Close()
 
-		// 复制响应头
-		for name, values := range resp.Header {
-			for _, value := range values {
-				w.Header().Add(name, value)
-			}
-		}
-
-		// 设置状态码
-		w.WriteHeader(resp.StatusCode)
-
-		// 复制响应体
-		_, err = io.Copy(w, resp.Body)
-		if err != nil {
-			log.Printf("复制响应体失败: %v", err)
-		}
-	})
+		// 非流式请求处理
+		handleNonStreamRequest(w, anthropicReq, token.AccessToken)
+	}))
 
 	// 添加健康检查端点
-	http.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/health", logMiddleware(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		w.Write([]byte("OK"))
-	})
+	}))
+
+	// 添加404处理
+	mux.HandleFunc("/", logMiddleware(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Printf("警告: 访问未知端点\n")
+		http.Error(w, "404 未找到", http.StatusNotFound)
+	}))
 
 	// 启动服务器
 	fmt.Printf("启动Anthropic API代理服务器，监听端口: %s\n", port)
-	fmt.Printf("可以通过 http://localhost:%s 访问代理服务\n", port)
+	fmt.Printf("可用端点:\n")
+	fmt.Printf("  POST /v1/messages - Anthropic API代理\n")
+	fmt.Printf("  GET  /health      - 健康检查\n")
 	fmt.Printf("按Ctrl+C停止服务器\n")
 
-	if err := http.ListenAndServe(":"+port, nil); err != nil {
+	if err := http.ListenAndServe(":"+port, mux); err != nil {
 		fmt.Printf("启动服务器失败: %v\n", err)
 		os.Exit(1)
 	}
+}
+
+// handleStreamRequest 处理流式请求
+func handleStreamRequest(w http.ResponseWriter, anthropicReq AnthropicRequest, accessToken string) {
+	// 设置SSE headers
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		http.Error(w, "Streaming unsupported!", http.StatusInternalServerError)
+		return
+	}
+
+	messageId := fmt.Sprintf("msg_%s", time.Now().Format("20060102150405"))
+
+	// 发送开始事件
+	messageStart := map[string]any{
+		"type": "message_start",
+		"message": map[string]any{
+			"id":            messageId,
+			"type":          "message",
+			"role":          "assistant",
+			"content":       []any{},
+			"model":         anthropicReq.Model,
+			"stop_reason":   nil,
+			"stop_sequence": nil,
+			"usage": map[string]any{
+				"input_tokens":  0,
+				"output_tokens": 0,
+			},
+		},
+	}
+	sendSSEEvent(w, flusher, "message_start", messageStart)
+
+	contentBlockStart := map[string]any{
+		"type":  "content_block_start",
+		"index": 0,
+		"content_block": map[string]any{
+			"type": "text",
+			"text": "",
+		},
+	}
+	sendSSEEvent(w, flusher, "content_block_start", contentBlockStart)
+
+	// 构建 CodeWhisperer 请求
+	cwReq := buildCodeWhispererRequest(anthropicReq)
+
+	// 序列化请求体
+	cwReqBody, err := json.Marshal(cwReq)
+	if err != nil {
+		sendErrorEvent(w, flusher, "序列化请求失败", err)
+		return
+	}
+
+	fmt.Printf("CodeWhisperer 流式请求体:\n%s\n", string(cwReqBody))
+
+	// 创建流式请求
+	proxyReq, err := http.NewRequest(
+		http.MethodPost,
+		"https://codewhisperer.us-east-1.amazonaws.com/generateAssistantResponse",
+		bytes.NewBuffer(cwReqBody),
+	)
+	if err != nil {
+		sendErrorEvent(w, flusher, "创建代理请求失败", err)
+		return
+	}
+
+	// 设置请求头
+	proxyReq.Header.Set("Authorization", "Bearer "+accessToken)
+	proxyReq.Header.Set("Content-Type", "application/json")
+	proxyReq.Header.Set("Accept", "text/event-stream")
+
+	// 发送请求
+	client := &http.Client{Transport: &http.Transport{
+		Proxy: http.ProxyURL(&url.URL{
+			Scheme: "http",
+			Host:   "127.0.0.1:9000",
+		}),
+	}}
+
+	resp, err := client.Do(proxyReq)
+	if err != nil {
+		sendErrorEvent(w, flusher, "发送流式请求失败", err)
+		return
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		fmt.Printf("CodeWhisperer 响应错误，状态码: %d, 响应: %s\n", resp.StatusCode, string(body))
+		sendErrorEvent(w, flusher, "CodeWhisperer API 错误", fmt.Errorf("状态码: %d", resp.StatusCode))
+		return
+	}
+
+	// 先读取整个响应体
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		sendErrorEvent(w, flusher, "读取响应体失败", err)
+		return
+	}
+
+	// 提取所有JSON内容并合并
+	var allContent strings.Builder
+	respStr := string(respBody)
+
+	// 使用正则表达式或字符串搜索提取所有JSON内容
+	for {
+		jsonStart := strings.Index(respStr, `{"content":"`)
+		if jsonStart == -1 {
+			break
+		}
+
+		// 从JSON开始位置查找
+		remaining := respStr[jsonStart:]
+		jsonEnd := strings.Index(remaining, `"}`)
+		if jsonEnd == -1 {
+			break
+		}
+
+		jsonStr := remaining[:jsonEnd+2] // 包含结束的 "}
+
+		// 解析JSON
+		var cwEvent map[string]any
+		if err := json.Unmarshal([]byte(jsonStr), &cwEvent); err != nil {
+			fmt.Printf("解析JSON失败: %v\n", err)
+			respStr = remaining[jsonEnd+2:]
+			continue
+		}
+
+		// 提取内容
+		if content, ok := cwEvent["content"].(string); ok && content != "" {
+			allContent.WriteString(content)
+		}
+
+		// 继续搜索下一个JSON
+		respStr = remaining[jsonEnd+2:]
+	}
+
+	// 获取完整内容
+	fullContent := allContent.String()
+	fmt.Printf("提取的完整内容: %s\n", fullContent)
+
+	if fullContent == "" {
+		sendErrorEvent(w, flusher, "未找到有效内容", fmt.Errorf("响应中没有content字段"))
+		return
+	}
+
+	// 将完整内容转换为流式输出
+	// 按单词分割，模拟流式输出
+	words := strings.Fields(fullContent)
+	var outputTokens int
+
+	for i, word := range words {
+		// 添加空格（除了第一个单词）
+		content := word
+		if i > 0 {
+			content = " " + word
+		}
+
+		// 发送 content_block_delta 事件
+		contentDelta := map[string]any{
+			"type":  "content_block_delta",
+			"index": 0,
+			"delta": map[string]any{
+				"type": "text_delta",
+				"text": content,
+			},
+		}
+		sendSSEEvent(w, flusher, "content_block_delta", contentDelta)
+		outputTokens++
+
+		// 添加小延迟模拟流式效果
+		time.Sleep(50 * time.Millisecond)
+	}
+
+	// 发送结束事件
+	contentBlockStop := map[string]any{
+		"type":  "content_block_stop",
+		"index": 0,
+	}
+	sendSSEEvent(w, flusher, "content_block_stop", contentBlockStop)
+
+	messageDelta := map[string]any{
+		"type": "message_delta",
+		"delta": map[string]any{
+			"stop_reason":   "end_turn",
+			"stop_sequence": nil,
+		},
+		"usage": map[string]any{
+			"output_tokens": outputTokens,
+		},
+	}
+	sendSSEEvent(w, flusher, "message_delta", messageDelta)
+
+	messageStop := map[string]any{
+		"type": "message_stop",
+	}
+	sendSSEEvent(w, flusher, "message_stop", messageStop)
+}
+
+// handleNonStreamRequest 处理非流式请求
+func handleNonStreamRequest(w http.ResponseWriter, anthropicReq AnthropicRequest, accessToken string) {
+	// 构建 CodeWhisperer 请求
+	cwReq := buildCodeWhispererRequest(anthropicReq)
+
+	// 序列化请求体
+	cwReqBody, err := json.Marshal(cwReq)
+	if err != nil {
+		fmt.Printf("错误: 序列化请求失败: %v\n", err)
+		http.Error(w, fmt.Sprintf("序列化请求失败: %v", err), http.StatusInternalServerError)
+		return
+	}
+
+	fmt.Printf("CodeWhisperer 请求体:\n%s\n", string(cwReqBody))
+
+	// 创建请求
+	proxyReq, err := http.NewRequest(
+		http.MethodPost,
+		"https://codewhisperer.us-east-1.amazonaws.com/generateAssistantResponse",
+		bytes.NewBuffer(cwReqBody),
+	)
+	if err != nil {
+		fmt.Printf("错误: 创建代理请求失败: %v\n", err)
+		http.Error(w, fmt.Sprintf("创建代理请求失败: %v", err), http.StatusInternalServerError)
+		return
+	}
+
+	// 设置请求头
+	proxyReq.Header.Set("Authorization", "Bearer "+accessToken)
+	proxyReq.Header.Set("Content-Type", "application/json")
+
+	// 发送请求
+	client := &http.Client{Transport: &http.Transport{
+		Proxy: http.ProxyURL(&url.URL{
+			Scheme: "http",
+			Host:   "127.0.0.1:9000",
+		}),
+	}}
+
+	resp, err := client.Do(proxyReq)
+	if err != nil {
+		fmt.Printf("错误: 发送请求失败: %v\n", err)
+		http.Error(w, fmt.Sprintf("发送请求失败: %v", err), http.StatusInternalServerError)
+		return
+	}
+	defer resp.Body.Close()
+
+	// 读取响应
+	cwRespBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		fmt.Printf("错误: 读取响应失败: %v\n", err)
+		http.Error(w, fmt.Sprintf("读取响应失败: %v", err), http.StatusInternalServerError)
+		return
+	}
+
+	fmt.Printf("CodeWhisperer 响应体:\n%s\n", string(cwRespBody))
+
+	// 构建 Anthropic 响应
+	anthropicResp := map[string]any{
+		"content": []map[string]any{
+			{
+				"text": string(cwRespBody),
+				"type": "text",
+			},
+		},
+		"model":         anthropicReq.Model,
+		"role":          "assistant",
+		"stop_reason":   "end_turn",
+		"stop_sequence": nil,
+		"type":          "message",
+		"usage": map[string]any{
+			"input_tokens":  0,
+			"output_tokens": 0,
+		},
+	}
+
+	// 发送响应
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(anthropicResp)
+}
+
+// buildCodeWhispererRequest 构建 CodeWhisperer 请求
+func buildCodeWhispererRequest(anthropicReq AnthropicRequest) CodeWhispererRequest {
+	cwReq := CodeWhispererRequest{
+		ProfileArn: "arn:aws:codewhisperer:us-east-1:699475941385:profile/EHGA3GRVQMUK",
+	}
+	cwReq.ConversationState.ChatTriggerType = "MANUAL"
+	cwReq.ConversationState.ConversationId = generateUUID()
+	cwReq.ConversationState.CurrentMessage.UserInputMessage.Content = getMessageContent(anthropicReq.Messages[len(anthropicReq.Messages)-1].Content)
+	cwReq.ConversationState.CurrentMessage.UserInputMessage.ModelId = ModelMap[anthropicReq.Model]
+	cwReq.ConversationState.CurrentMessage.UserInputMessage.Origin = "AI_EDITOR"
+	cwReq.ConversationState.CurrentMessage.UserInputMessage.UserInputMessageContext = make(map[string]any)
+
+	// 构建历史消息
+	if len(anthropicReq.Messages) > 1 {
+		history := make([]struct {
+			UserInputMessage struct {
+				Content string `json:"content"`
+				ModelId string `json:"modelId"`
+				Origin  string `json:"origin"`
+			} `json:"userInputMessage,omitempty"`
+			AssistantResponseMessage struct {
+				Content  string `json:"content"`
+				ToolUses []any  `json:"toolUses"`
+			} `json:"assistantResponseMessage,omitempty"`
+		}, 0)
+
+		for i := 0; i < len(anthropicReq.Messages)-1; i += 2 {
+			var historyItem struct {
+				UserInputMessage struct {
+					Content string `json:"content"`
+					ModelId string `json:"modelId"`
+					Origin  string `json:"origin"`
+				} `json:"userInputMessage,omitempty"`
+				AssistantResponseMessage struct {
+					Content  string `json:"content"`
+					ToolUses []any  `json:"toolUses"`
+				} `json:"assistantResponseMessage,omitempty"`
+			}
+
+			if anthropicReq.Messages[i].Role == "user" {
+				historyItem.UserInputMessage.Content = getMessageContent(anthropicReq.Messages[i].Content)
+				historyItem.UserInputMessage.ModelId = ModelMap[anthropicReq.Model]
+				historyItem.UserInputMessage.Origin = "AI_EDITOR"
+
+				if i+1 < len(anthropicReq.Messages)-1 && anthropicReq.Messages[i+1].Role == "assistant" {
+					historyItem.AssistantResponseMessage.Content = getMessageContent(anthropicReq.Messages[i+1].Content)
+					historyItem.AssistantResponseMessage.ToolUses = make([]any, 0)
+				}
+
+				history = append(history, historyItem)
+			}
+		}
+
+		cwReq.ConversationState.History = history
+	}
+
+	return cwReq
+}
+
+// sendSSEEvent 发送 SSE 事件
+func sendSSEEvent(w http.ResponseWriter, flusher http.Flusher, eventType string, data any) {
+	dataBytes, err := json.Marshal(data)
+	if err != nil {
+		fmt.Printf("错误: 序列化事件数据失败: %v\n", err)
+		return
+	}
+
+	fmt.Fprintf(w, "event: %s\n", eventType)
+	fmt.Fprintf(w, "data: %s\n\n", string(dataBytes))
+	flusher.Flush()
+}
+
+// sendErrorEvent 发送错误事件
+func sendErrorEvent(w http.ResponseWriter, flusher http.Flusher, message string, err error) {
+	errorResp := map[string]any{
+		"type": "error",
+		"error": map[string]any{
+			"type":    "server_error",
+			"message": fmt.Sprintf("%s: %v", message, err),
+		},
+	}
+	sendSSEEvent(w, flusher, "error", errorResp)
 }

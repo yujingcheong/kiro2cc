@@ -86,7 +86,7 @@ curl -X POST http://localhost:8080 \
 
 工具会设置以下环境变量：
 
--   [] `ANTHROPIC_BASE_URL`: https://codewhisperer.us-east-1.amazonaws.com/generateAssistantResponse
+-   [] `ANTHROPIC_BASE_URL`: https://localhost:8080
 -   [] `ANTHROPIC_API_KEY`: 当前的access token
 
 ## 跨平台支持
