@@ -507,6 +507,7 @@ func setClaude() {
 	}
 
 	jsonData["hasCompletedOnboarding"] = true
+	jsonData["kiro2cc"] = true
 
 	newJson, err := json.MarshalIndent(jsonData, "", "  ")
 
