@@ -767,7 +767,7 @@ func handleStreamRequest(w http.ResponseWriter, anthropicReq AnthropicRequest, a
 			}
 
 			// 随机延时
-			time.Sleep(time.Duration(rand.Intn(1000)) * time.Millisecond)
+			time.Sleep(time.Duration(rand.Intn(300)) * time.Millisecond)
 		}
 
 		contentBlockStop := map[string]any{
