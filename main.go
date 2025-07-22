@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"crypto/rand"
 	"encoding/json"
+	jsonStr "encoding/json"
 	"fmt"
 	"io"
 	"log"
@@ -145,8 +146,8 @@ func getMessageContent(content any) string {
 
 			if m, ok := block.(map[string]interface{}); ok {
 				var cb ContentBlock
-				if data, err := json.Marshal(m); err == nil {
-					if err := json.Unmarshal(data, &cb); err == nil {
+				if data, err := jsonStr.Marshal(m); err == nil {
+					if err := jsonStr.Unmarshal(data, &cb); err == nil {
 						switch cb.Type {
 						case "tool_result":
 							texts = append(texts, *cb.Content)
@@ -160,7 +161,7 @@ func getMessageContent(content any) string {
 
 		}
 		if len(texts) == 0 {
-			s, err := json.Marshal(content)
+			s, err := jsonStr.Marshal(content)
 			if err != nil {
 				return "answer for user qeustion"
 			}
@@ -170,7 +171,7 @@ func getMessageContent(content any) string {
 		}
 		return strings.Join(texts, "\n")
 	default:
-		s, err := json.Marshal(content)
+		s, err := jsonStr.Marshal(content)
 		if err != nil {
 			return "answer for user qeustion"
 		}
@@ -308,7 +309,9 @@ func main() {
 		fmt.Println("  kiro2cc read    - 读取并显示token")
 		fmt.Println("  kiro2cc refresh - 刷新token")
 		fmt.Println("  kiro2cc export  - 导出环境变量")
+		fmt.Println("  kiro2cc claude  - 跳过 claude 地区限制")
 		fmt.Println("  kiro2cc server [port] - 启动Anthropic API代理服务器")
+		fmt.Println("  author https://github.com/bestK/kiro2cc")
 		os.Exit(1)
 	}
 
@@ -321,6 +324,9 @@ func main() {
 		refreshToken()
 	case "export":
 		exportEnvVars()
+
+	case "claude":
+		setClaude()
 	case "server":
 		port := "8080" // 默认端口
 		if len(os.Args) > 2 {
@@ -355,7 +361,7 @@ func readToken() {
 	}
 
 	var token TokenData
-	if err := json.Unmarshal(data, &token); err != nil {
+	if err := jsonStr.Unmarshal(data, &token); err != nil {
 		fmt.Printf("解析token文件失败: %v\n", err)
 		os.Exit(1)
 	}
@@ -380,7 +386,7 @@ func refreshToken() {
 	}
 
 	var currentToken TokenData
-	if err := json.Unmarshal(data, &currentToken); err != nil {
+	if err := jsonStr.Unmarshal(data, &currentToken); err != nil {
 		fmt.Printf("解析token文件失败: %v\n", err)
 		os.Exit(1)
 	}
@@ -390,7 +396,7 @@ func refreshToken() {
 		RefreshToken: currentToken.RefreshToken,
 	}
 
-	reqBody, err := json.Marshal(refreshReq)
+	reqBody, err := jsonStr.Marshal(refreshReq)
 	if err != nil {
 		fmt.Printf("序列化请求失败: %v\n", err)
 		os.Exit(1)
@@ -416,7 +422,7 @@ func refreshToken() {
 
 	// 解析响应
 	var refreshResp RefreshResponse
-	if err := json.NewDecoder(resp.Body).Decode(&refreshResp); err != nil {
+	if err := jsonStr.NewDecoder(resp.Body).Decode(&refreshResp); err != nil {
 		fmt.Printf("解析刷新响应失败: %v\n", err)
 		os.Exit(1)
 	}
@@ -424,7 +430,7 @@ func refreshToken() {
 	// 更新token文件
 	newToken := TokenData(refreshResp)
 
-	newData, err := json.MarshalIndent(newToken, "", "  ")
+	newData, err := jsonStr.MarshalIndent(newToken, "", "  ")
 	if err != nil {
 		fmt.Printf("序列化新token失败: %v\n", err)
 		os.Exit(1)
@@ -445,12 +451,12 @@ func exportEnvVars() {
 
 	data, err := os.ReadFile(tokenPath)
 	if err != nil {
-		fmt.Printf("读取token文件失败: %v\n", err)
+		fmt.Printf("读取 token失败,请先安装 Kiro 并登录！: %v\n", err)
 		os.Exit(1)
 	}
 
 	var token TokenData
-	if err := json.Unmarshal(data, &token); err != nil {
+	if err := jsonStr.Unmarshal(data, &token); err != nil {
 		fmt.Printf("解析token文件失败: %v\n", err)
 		os.Exit(1)
 	}
@@ -469,6 +475,57 @@ func exportEnvVars() {
 	}
 }
 
+func setClaude() {
+	// C:\Users\WIN10\.claude.json
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		fmt.Printf("获取用户目录失败: %v\n", err)
+		os.Exit(1)
+	}
+
+	claudeJsonPath := filepath.Join(homeDir, ".claude.json")
+	ok, _ := FileExists(claudeJsonPath)
+	if !ok {
+		fmt.Println("未找到Claude配置文件，请确认是否已安装 Claude Code")
+		fmt.Println("npm install -g @anthropic-ai/claude-code")
+		os.Exit(1)
+	}
+
+	data, err := os.ReadFile(claudeJsonPath)
+	if err != nil {
+		fmt.Printf("读取 Claude 文件失败: %v\n", err)
+		os.Exit(1)
+	}
+
+	var jsonData map[string]interface{}
+
+	err = jsonStr.Unmarshal(data, &jsonData)
+
+	if err != nil {
+		fmt.Printf("解析 JSON 文件失败: %v\n", err)
+		os.Exit(1)
+	}
+
+	jsonData["hasCompletedOnboarding"] = true
+
+	newJson, err := json.MarshalIndent(jsonData, "", "  ")
+
+	if err != nil {
+		fmt.Printf("生成 JSON 文件失败: %v\n", err)
+		os.Exit(1)
+	}
+
+	err = os.WriteFile(claudeJsonPath, newJson, 0644)
+
+	if err != nil {
+		fmt.Printf("写入 JSON 文件失败: %v\n", err)
+		os.Exit(1)
+	}
+
+	fmt.Println("Claude 配置文件已更新")
+
+}
+
 // getToken 获取当前token
 func getToken() (TokenData, error) {
 	tokenPath := getTokenFilePath()
@@ -479,7 +536,7 @@ func getToken() (TokenData, error) {
 	}
 
 	var token TokenData
-	if err := json.Unmarshal(data, &token); err != nil {
+	if err := jsonStr.Unmarshal(data, &token); err != nil {
 		return TokenData{}, fmt.Errorf("解析token文件失败: %v", err)
 	}
 
@@ -546,7 +603,7 @@ func startServer(port string) {
 
 		// 解析 Anthropic 请求
 		var anthropicReq AnthropicRequest
-		if err := json.Unmarshal(body, &anthropicReq); err != nil {
+		if err := jsonStr.Unmarshal(body, &anthropicReq); err != nil {
 			fmt.Printf("错误: 解析请求体失败: %v\n", err)
 			http.Error(w, fmt.Sprintf("解析请求体失败: %v", err), http.StatusBadRequest)
 			return
@@ -607,7 +664,7 @@ func handleStreamRequest(w http.ResponseWriter, anthropicReq AnthropicRequest, a
 	cwReq := buildCodeWhispererRequest(anthropicReq)
 
 	// 序列化请求体
-	cwReqBody, err := json.Marshal(cwReq)
+	cwReqBody, err := jsonStr.Marshal(cwReq)
 	if err != nil {
 		sendErrorEvent(w, flusher, "序列化请求失败", err)
 		return
@@ -711,7 +768,7 @@ func handleNonStreamRequest(w http.ResponseWriter, anthropicReq AnthropicRequest
 	cwReq := buildCodeWhispererRequest(anthropicReq)
 
 	// 序列化请求体
-	cwReqBody, err := json.Marshal(cwReq)
+	cwReqBody, err := jsonStr.Marshal(cwReq)
 	if err != nil {
 		fmt.Printf("错误: 序列化请求失败: %v\n", err)
 		http.Error(w, fmt.Sprintf("序列化请求失败: %v", err), http.StatusInternalServerError)
@@ -812,7 +869,7 @@ func handleNonStreamRequest(w http.ResponseWriter, anthropicReq AnthropicRequest
 						switch index {
 						case 1:
 							toolInput := map[string]interface{}{}
-							if err := json.Unmarshal([]byte(partialJsonStr), &toolInput); err != nil {
+							if err := jsonStr.Unmarshal([]byte(partialJsonStr), &toolInput); err != nil {
 								log.Printf("json unmarshal error:%s", err.Error())
 							}
 
@@ -857,13 +914,13 @@ func handleNonStreamRequest(w http.ResponseWriter, anthropicReq AnthropicRequest
 
 	// 发送响应
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(anthropicResp)
+	jsonStr.NewEncoder(w).Encode(anthropicResp)
 }
 
 // sendSSEEvent 发送 SSE 事件
 func sendSSEEvent(w http.ResponseWriter, flusher http.Flusher, eventType string, data any) {
 
-	json, err := json.Marshal(data)
+	json, err := jsonStr.Marshal(data)
 	if err != nil {
 		return
 	}
@@ -890,4 +947,15 @@ func sendErrorEvent(w http.ResponseWriter, flusher http.Flusher, message string,
 	// data: {"type": "error", "error": {"type": "overloaded_error", "message": "Overloaded"}}
 
 	sendSSEEvent(w, flusher, "error", errorResp)
+}
+
+func FileExists(path string) (bool, error) {
+	_, err := os.Stat(path)
+	if err == nil {
+		return true, nil // 文件或文件夹存在
+	}
+	if os.IsNotExist(err) {
+		return false, nil // 文件或文件夹不存在
+	}
+	return false, err // 其他错误
 }
