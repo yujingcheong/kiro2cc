@@ -2,14 +2,13 @@ package main
 
 import (
 	"bytes"
-	"crypto/rand"
 	"encoding/json"
 	jsonStr "encoding/json"
 	"fmt"
 	"io"
 	"log"
+	"math/rand"
 	"net/http"
-	"net/url"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -690,12 +689,7 @@ func handleStreamRequest(w http.ResponseWriter, anthropicReq AnthropicRequest, a
 	proxyReq.Header.Set("Accept", "text/event-stream")
 
 	// 发送请求
-	client := &http.Client{Transport: &http.Transport{
-		Proxy: http.ProxyURL(&url.URL{
-			Scheme: "http",
-			Host:   "127.0.0.1:9000",
-		}),
-	}}
+	client := &http.Client{}
 
 	resp, err := client.Do(proxyReq)
 	if err != nil {
@@ -754,11 +748,45 @@ func handleStreamRequest(w http.ResponseWriter, anthropicReq AnthropicRequest, a
 			"type": "ping",
 		})
 
-		// 处理解析出的事件
-		for _, e := range events {
-			sendSSEEvent(w, flusher, e.Event, e.Data)
+		contentBlockStart := map[string]any{
+			"content_block": map[string]any{
+				"text": "",
+				"type": "text"},
+			"index": 0, "type": "content_block_start",
 		}
 
+		sendSSEEvent(w, flusher, "content_block_start", contentBlockStart)
+		// 处理解析出的事件
+
+		outputTokens := 0
+		for _, e := range events {
+			sendSSEEvent(w, flusher, e.Event, e.Data)
+
+			if e.Event == "content_block_delta" {
+				outputTokens = len(getMessageContent(e.Data))
+			}
+
+			// 随机延时
+			time.Sleep(time.Duration(rand.Intn(1000)) * time.Millisecond)
+		}
+
+		contentBlockStop := map[string]any{
+			"index": 0,
+			"type":  "content_block_stop",
+		}
+		sendSSEEvent(w, flusher, "content_block_stop", contentBlockStop)
+
+		contentBlockStopReason := map[string]any{
+			"type": "message_delta", "delta": map[string]any{"stop_reason": "end_turn", "stop_sequence": nil}, "usage": map[string]any{
+				"output_tokens": outputTokens,
+			},
+		}
+		sendSSEEvent(w, flusher, "message_delta", contentBlockStopReason)
+
+		messageStop := map[string]any{
+			"type": "message_stop",
+		}
+		sendSSEEvent(w, flusher, "message_stop", messageStop)
 	}
 
 }
@@ -795,12 +823,7 @@ func handleNonStreamRequest(w http.ResponseWriter, anthropicReq AnthropicRequest
 	proxyReq.Header.Set("Content-Type", "application/json")
 
 	// 发送请求
-	client := &http.Client{Transport: &http.Transport{
-		Proxy: http.ProxyURL(&url.URL{
-			Scheme: "http",
-			Host:   "127.0.0.1:9000",
-		}),
-	}}
+	client := &http.Client{}
 
 	resp, err := client.Do(proxyReq)
 	if err != nil {
