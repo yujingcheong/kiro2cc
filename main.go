@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"net/url"
 	"os"
@@ -13,6 +14,8 @@ import (
 	"runtime"
 	"strings"
 	"time"
+
+	"github.com/bestk/kiro2cc/parser"
 )
 
 // TokenData 表示token文件的结构
@@ -34,12 +37,57 @@ type RefreshResponse struct {
 	ExpiresAt    string `json:"expiresAt,omitempty"`
 }
 
+// AnthropicTool 表示 Anthropic API 的工具结构
+type AnthropicTool struct {
+	Name        string         `json:"name"`
+	Description string         `json:"description"`
+	InputSchema map[string]any `json:"input_schema"`
+}
+
+// InputSchema 表示工具输入模式的结构
+type InputSchema struct {
+	Json map[string]any `json:"json"`
+}
+
+// ToolSpecification 表示工具规范的结构
+type ToolSpecification struct {
+	Name        string      `json:"name"`
+	Description string      `json:"description"`
+	InputSchema InputSchema `json:"inputSchema"`
+}
+
+// CodeWhispererTool 表示 CodeWhisperer API 的工具结构
+type CodeWhispererTool struct {
+	ToolSpecification ToolSpecification `json:"toolSpecification"`
+}
+
+// HistoryUserMessage 表示历史记录中的用户消息
+type HistoryUserMessage struct {
+	UserInputMessage struct {
+		Content string `json:"content"`
+		ModelId string `json:"modelId"`
+		Origin  string `json:"origin"`
+	} `json:"userInputMessage"`
+}
+
+// HistoryAssistantMessage 表示历史记录中的助手消息
+type HistoryAssistantMessage struct {
+	AssistantResponseMessage struct {
+		Content  string `json:"content"`
+		ToolUses []any  `json:"toolUses"`
+	} `json:"assistantResponseMessage"`
+}
+
 // AnthropicRequest 表示 Anthropic API 的请求结构
 type AnthropicRequest struct {
-	Model     string                    `json:"model"`
-	MaxTokens int                       `json:"max_tokens"`
-	Messages  []AnthropicRequestMessage `json:"messages"`
-	Stream    bool                      `json:"stream"`
+	Model       string                    `json:"model"`
+	MaxTokens   int                       `json:"max_tokens"`
+	Messages    []AnthropicRequestMessage `json:"messages"`
+	System      []AnthropicSystemMessage  `json:"system,omitempty"`
+	Tools       []AnthropicTool           `json:"tools,omitempty"`
+	Stream      bool                      `json:"stream"`
+	Temperature *float64                  `json:"temperature,omitempty"`
+	Metadata    map[string]any            `json:"metadata,omitempty"`
 }
 
 // AnthropicStreamResponse 表示 Anthropic 流式响应的结构
@@ -68,29 +116,67 @@ type AnthropicRequestMessage struct {
 	Content any    `json:"content"` // 可以是 string 或 []ContentBlock
 }
 
+type AnthropicSystemMessage struct {
+	Type string `json:"type"`
+	Text string `json:"text"` // 可以是 string 或 []ContentBlock
+}
+
 // ContentBlock 表示消息内容块的结构
 type ContentBlock struct {
-	Type string `json:"type"`
-	Text string `json:"text"`
+	Type      string  `json:"type"`
+	Text      *string `json:"text,omitempty"`
+	ToolUseId *string `json:"tool_use_id,omitempty"`
+	Content   *string `json:"content,omitempty"`
+	Name      *string `json:"name,omitempty"`
+	Input     *any    `json:"input,omitempty"`
 }
 
 // getMessageContent 从消息中提取文本内容
 func getMessageContent(content any) string {
 	switch v := content.(type) {
 	case string:
+		if len(v) == 0 {
+			return "answer for user qeustion"
+		}
 		return v
-	case []any:
+	case []interface{}:
 		var texts []string
 		for _, block := range v {
-			if blockMap, ok := block.(map[string]any); ok {
-				if text, ok := blockMap["text"].(string); ok {
-					texts = append(texts, text)
+
+			if m, ok := block.(map[string]interface{}); ok {
+				var cb ContentBlock
+				if data, err := json.Marshal(m); err == nil {
+					if err := json.Unmarshal(data, &cb); err == nil {
+						switch cb.Type {
+						case "tool_result":
+							texts = append(texts, *cb.Content)
+						case "text":
+							texts = append(texts, *cb.Text)
+						}
+					}
+
 				}
 			}
+
+		}
+		if len(texts) == 0 {
+			s, err := json.Marshal(content)
+			if err != nil {
+				return "answer for user qeustion"
+			}
+
+			log.Printf("uncatch: %s", string(s))
+			return "answer for user qeustion"
 		}
 		return strings.Join(texts, "\n")
 	default:
-		return ""
+		s, err := json.Marshal(content)
+		if err != nil {
+			return "answer for user qeustion"
+		}
+
+		log.Printf("uncatch: %s", string(s))
+		return "answer for user qeustion"
 	}
 }
 
@@ -101,23 +187,22 @@ type CodeWhispererRequest struct {
 		ConversationId  string `json:"conversationId"`
 		CurrentMessage  struct {
 			UserInputMessage struct {
-				Content                 string         `json:"content"`
-				ModelId                 string         `json:"modelId"`
-				Origin                  string         `json:"origin"`
-				UserInputMessageContext map[string]any `json:"userInputMessageContext"`
+				Content                 string `json:"content"`
+				ModelId                 string `json:"modelId"`
+				Origin                  string `json:"origin"`
+				UserInputMessageContext struct {
+					ToolResults []struct {
+						Content []struct {
+							Text string `json:"text"`
+						} `json:"content"`
+						Status    string `json:"status"`
+						ToolUseId string `json:"toolUseId"`
+					} `json:"toolResults,omitempty"`
+					Tools []CodeWhispererTool `json:"tools,omitempty"`
+				} `json:"userInputMessageContext"`
 			} `json:"userInputMessage"`
 		} `json:"currentMessage"`
-		History []struct {
-			UserInputMessage struct {
-				Content string `json:"content"`
-				ModelId string `json:"modelId"`
-				Origin  string `json:"origin"`
-			} `json:"userInputMessage,omitempty"`
-			AssistantResponseMessage struct {
-				Content  string `json:"content"`
-				ToolUses []any  `json:"toolUses"`
-			} `json:"assistantResponseMessage,omitempty"`
-		} `json:"history"`
+		History []any `json:"history"`
 	} `json:"conversationState"`
 	ProfileArn string `json:"profileArn"`
 }
@@ -142,6 +227,79 @@ func generateUUID() string {
 	b[6] = (b[6] & 0x0f) | 0x40 // Version 4
 	b[8] = (b[8] & 0x3f) | 0x80 // Variant bits
 	return fmt.Sprintf("%x-%x-%x-%x-%x", b[0:4], b[4:6], b[6:8], b[8:10], b[10:])
+}
+
+// buildCodeWhispererRequest 构建 CodeWhisperer 请求
+func buildCodeWhispererRequest(anthropicReq AnthropicRequest) CodeWhispererRequest {
+	cwReq := CodeWhispererRequest{
+		ProfileArn: "arn:aws:codewhisperer:us-east-1:699475941385:profile/EHGA3GRVQMUK",
+	}
+	cwReq.ConversationState.ChatTriggerType = "MANUAL"
+	cwReq.ConversationState.ConversationId = generateUUID()
+	cwReq.ConversationState.CurrentMessage.UserInputMessage.Content = getMessageContent(anthropicReq.Messages[len(anthropicReq.Messages)-1].Content)
+	cwReq.ConversationState.CurrentMessage.UserInputMessage.ModelId = ModelMap[anthropicReq.Model]
+	cwReq.ConversationState.CurrentMessage.UserInputMessage.Origin = "AI_EDITOR"
+	// 处理 tools 信息
+	if len(anthropicReq.Tools) > 0 {
+		var tools []CodeWhispererTool
+		for _, tool := range anthropicReq.Tools {
+			cwTool := CodeWhispererTool{}
+			cwTool.ToolSpecification.Name = tool.Name
+			cwTool.ToolSpecification.Description = tool.Description
+			cwTool.ToolSpecification.InputSchema = InputSchema{
+				Json: tool.InputSchema,
+			}
+			tools = append(tools, cwTool)
+		}
+		cwReq.ConversationState.CurrentMessage.UserInputMessage.UserInputMessageContext.Tools = tools
+	}
+
+	// 构建历史消息
+	// 先处理 system 消息或者常规历史消息
+	if len(anthropicReq.System) > 0 || len(anthropicReq.Messages) > 1 {
+		var history []any
+
+		// 首先添加每个 system 消息作为独立的历史记录项
+
+		assistantDefaultMsg := HistoryAssistantMessage{}
+		assistantDefaultMsg.AssistantResponseMessage.Content = getMessageContent("I will follow these instructions")
+		assistantDefaultMsg.AssistantResponseMessage.ToolUses = make([]any, 0)
+
+		if len(anthropicReq.System) > 0 {
+			for _, sysMsg := range anthropicReq.System {
+				userMsg := HistoryUserMessage{}
+				userMsg.UserInputMessage.Content = sysMsg.Text
+				userMsg.UserInputMessage.ModelId = ModelMap[anthropicReq.Model]
+				userMsg.UserInputMessage.Origin = "AI_EDITOR"
+				history = append(history, userMsg)
+				history = append(history, assistantDefaultMsg)
+			}
+		}
+
+		// 然后处理常规消息历史
+		for i := 0; i < len(anthropicReq.Messages)-1; i++ {
+			if anthropicReq.Messages[i].Role == "user" {
+				userMsg := HistoryUserMessage{}
+				userMsg.UserInputMessage.Content = getMessageContent(anthropicReq.Messages[i].Content)
+				userMsg.UserInputMessage.ModelId = ModelMap[anthropicReq.Model]
+				userMsg.UserInputMessage.Origin = "AI_EDITOR"
+				history = append(history, userMsg)
+
+				// 检查下一条消息是否是助手回复
+				if i+1 < len(anthropicReq.Messages)-1 && anthropicReq.Messages[i+1].Role == "assistant" {
+					assistantMsg := HistoryAssistantMessage{}
+					assistantMsg.AssistantResponseMessage.Content = getMessageContent(anthropicReq.Messages[i+1].Content)
+					assistantMsg.AssistantResponseMessage.ToolUses = make([]any, 0)
+					history = append(history, assistantMsg)
+					i++ // 跳过已处理的助手消息
+				}
+			}
+		}
+
+		cwReq.ConversationState.History = history
+	}
+
+	return cwReq
 }
 
 func main() {
@@ -264,11 +422,7 @@ func refreshToken() {
 	}
 
 	// 更新token文件
-	newToken := TokenData{
-		AccessToken:  refreshResp.AccessToken,
-		RefreshToken: refreshResp.RefreshToken,
-		ExpiresAt:    refreshResp.ExpiresAt,
-	}
+	newToken := TokenData(refreshResp)
 
 	newData, err := json.MarshalIndent(newToken, "", "  ")
 	if err != nil {
@@ -303,10 +457,14 @@ func exportEnvVars() {
 
 	// 根据操作系统输出不同格式的环境变量设置命令
 	if runtime.GOOS == "windows" {
-		fmt.Printf("set ANTHROPIC_BASE_URL=https://localhost:8080")
-		fmt.Printf("set ANTHROPIC_API_KEY=%s\n", token.AccessToken)
+		fmt.Println("CMD")
+		fmt.Printf("set ANTHROPIC_BASE_URL=http://localhost:8080\n")
+		fmt.Printf("set ANTHROPIC_API_KEY=%s\n\n", token.AccessToken)
+		fmt.Println("Powershell")
+		fmt.Println(`$env:ANTHROPIC_BASE_URL="http://localhost:8080"`)
+		fmt.Printf(`$env:ANTHROPIC_API_KEY="%s"`, token.AccessToken)
 	} else {
-		fmt.Printf("export ANTHROPIC_BASE_URL=https://localhost:8080")
+		fmt.Printf("export ANTHROPIC_BASE_URL=http://localhost:8080\n")
 		fmt.Printf("export ANTHROPIC_API_KEY=\"%s\"\n", token.AccessToken)
 	}
 }
@@ -333,15 +491,15 @@ func logMiddleware(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		startTime := time.Now()
 
-		fmt.Printf("\n=== 收到请求 ===\n")
-		fmt.Printf("时间: %s\n", startTime.Format("2006-01-02 15:04:05"))
-		fmt.Printf("请求方法: %s\n", r.Method)
-		fmt.Printf("请求路径: %s\n", r.URL.Path)
-		fmt.Printf("客户端IP: %s\n", r.RemoteAddr)
-		fmt.Printf("请求头:\n")
-		for name, values := range r.Header {
-			fmt.Printf("  %s: %s\n", name, strings.Join(values, ", "))
-		}
+		// fmt.Printf("\n=== 收到请求 ===\n")
+		// fmt.Printf("时间: %s\n", startTime.Format("2006-01-02 15:04:05"))
+		// fmt.Printf("请求方法: %s\n", r.Method)
+		// fmt.Printf("请求路径: %s\n", r.URL.Path)
+		// fmt.Printf("客户端IP: %s\n", r.RemoteAddr)
+		// fmt.Printf("请求头:\n")
+		// for name, values := range r.Header {
+		// 	fmt.Printf("  %s: %s\n", name, strings.Join(values, ", "))
+		// }
 
 		// 调用下一个处理器
 		next(w, r)
@@ -384,7 +542,7 @@ func startServer(port string) {
 		}
 		defer r.Body.Close()
 
-		fmt.Printf("Anthropic 请求体:\n%s\n", string(body))
+		fmt.Printf("\n=========================Anthropic 请求体:\n%s\n=======================================\n", string(body))
 
 		// 解析 Anthropic 请求
 		var anthropicReq AnthropicRequest
@@ -445,35 +603,6 @@ func handleStreamRequest(w http.ResponseWriter, anthropicReq AnthropicRequest, a
 
 	messageId := fmt.Sprintf("msg_%s", time.Now().Format("20060102150405"))
 
-	// 发送开始事件
-	messageStart := map[string]any{
-		"type": "message_start",
-		"message": map[string]any{
-			"id":            messageId,
-			"type":          "message",
-			"role":          "assistant",
-			"content":       []any{},
-			"model":         anthropicReq.Model,
-			"stop_reason":   nil,
-			"stop_sequence": nil,
-			"usage": map[string]any{
-				"input_tokens":  0,
-				"output_tokens": 0,
-			},
-		},
-	}
-	sendSSEEvent(w, flusher, "message_start", messageStart)
-
-	contentBlockStart := map[string]any{
-		"type":  "content_block_start",
-		"index": 0,
-		"content_block": map[string]any{
-			"type": "text",
-			"text": "",
-		},
-	}
-	sendSSEEvent(w, flusher, "content_block_start", contentBlockStart)
-
 	// 构建 CodeWhisperer 请求
 	cwReq := buildCodeWhispererRequest(anthropicReq)
 
@@ -484,7 +613,7 @@ func handleStreamRequest(w http.ResponseWriter, anthropicReq AnthropicRequest, a
 		return
 	}
 
-	fmt.Printf("CodeWhisperer 流式请求体:\n%s\n", string(cwReqBody))
+	// fmt.Printf("CodeWhisperer 流式请求体:\n%s\n", string(cwReqBody))
 
 	// 创建流式请求
 	proxyReq, err := http.NewRequest(
@@ -512,7 +641,7 @@ func handleStreamRequest(w http.ResponseWriter, anthropicReq AnthropicRequest, a
 
 	resp, err := client.Do(proxyReq)
 	if err != nil {
-		sendErrorEvent(w, flusher, "发送流式请求失败", err)
+		sendErrorEvent(w, flusher, "CodeWhisperer reqeust error", fmt.Errorf("reqeust error: %s", err.Error()))
 		return
 	}
 	defer resp.Body.Close()
@@ -520,114 +649,60 @@ func handleStreamRequest(w http.ResponseWriter, anthropicReq AnthropicRequest, a
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
 		fmt.Printf("CodeWhisperer 响应错误，状态码: %d, 响应: %s\n", resp.StatusCode, string(body))
-		sendErrorEvent(w, flusher, "CodeWhisperer API 错误", fmt.Errorf("状态码: %d", resp.StatusCode))
+		sendErrorEvent(w, flusher, "error", fmt.Errorf("状态码: %d", resp.StatusCode))
+
+		if resp.StatusCode == 403 {
+			refreshToken()
+			sendErrorEvent(w, flusher, "error", fmt.Errorf("CodeWhisperer Token 已刷新，请重试"))
+		} else {
+			sendErrorEvent(w, flusher, "error", fmt.Errorf("CodeWhisperer Error: %s ", string(body)))
+		}
 		return
 	}
 
 	// 先读取整个响应体
 	respBody, err := io.ReadAll(resp.Body)
 	if err != nil {
-		sendErrorEvent(w, flusher, "读取响应体失败", err)
+		sendErrorEvent(w, flusher, "error", fmt.Errorf("CodeWhisperer Error 读取响应失败"))
 		return
 	}
 
-	// 提取所有JSON内容并合并
-	var allContent strings.Builder
-	respStr := string(respBody)
+	// os.WriteFile(messageId+"response.raw", respBody, 0644)
 
-	// 使用正则表达式或字符串搜索提取所有JSON内容
-	for {
-		jsonStart := strings.Index(respStr, `{"content":"`)
-		if jsonStart == -1 {
-			break
-		}
+	// 使用新的CodeWhisperer解析器
+	events := parser.ParseEvents(respBody)
 
-		// 从JSON开始位置查找
-		remaining := respStr[jsonStart:]
-		jsonEnd := strings.Index(remaining, `"}`)
-		if jsonEnd == -1 {
-			break
-		}
+	if len(events) > 0 {
 
-		jsonStr := remaining[:jsonEnd+2] // 包含结束的 "}
-
-		// 解析JSON
-		var cwEvent map[string]any
-		if err := json.Unmarshal([]byte(jsonStr), &cwEvent); err != nil {
-			fmt.Printf("解析JSON失败: %v\n", err)
-			respStr = remaining[jsonEnd+2:]
-			continue
-		}
-
-		// 提取内容
-		if content, ok := cwEvent["content"].(string); ok && content != "" {
-			allContent.WriteString(content)
-		}
-
-		// 继续搜索下一个JSON
-		respStr = remaining[jsonEnd+2:]
-	}
-
-	// 获取完整内容
-	fullContent := allContent.String()
-	fmt.Printf("提取的完整内容: %s\n", fullContent)
-
-	if fullContent == "" {
-		sendErrorEvent(w, flusher, "未找到有效内容", fmt.Errorf("响应中没有content字段"))
-		return
-	}
-
-	// 将完整内容转换为流式输出
-	// 按单词分割，模拟流式输出
-	words := strings.Fields(fullContent)
-	var outputTokens int
-
-	for i, word := range words {
-		// 添加空格（除了第一个单词）
-		content := word
-		if i > 0 {
-			content = " " + word
-		}
-
-		// 发送 content_block_delta 事件
-		contentDelta := map[string]any{
-			"type":  "content_block_delta",
-			"index": 0,
-			"delta": map[string]any{
-				"type": "text_delta",
-				"text": content,
+		// 发送开始事件
+		messageStart := map[string]any{
+			"type": "message_start",
+			"message": map[string]any{
+				"id":            messageId,
+				"type":          "message",
+				"role":          "assistant",
+				"content":       []any{},
+				"model":         anthropicReq.Model,
+				"stop_reason":   nil,
+				"stop_sequence": nil,
+				"usage": map[string]any{
+					"input_tokens":  len(getMessageContent(anthropicReq.Messages[0].Content)),
+					"output_tokens": 1,
+				},
 			},
 		}
-		sendSSEEvent(w, flusher, "content_block_delta", contentDelta)
-		outputTokens++
+		sendSSEEvent(w, flusher, "message_start", messageStart)
+		sendSSEEvent(w, flusher, "ping", map[string]string{
+			"type": "ping",
+		})
 
-		// 添加小延迟模拟流式效果
-		time.Sleep(50 * time.Millisecond)
+		// 处理解析出的事件
+		for _, e := range events {
+			sendSSEEvent(w, flusher, e.Event, e.Data)
+		}
+
 	}
 
-	// 发送结束事件
-	contentBlockStop := map[string]any{
-		"type":  "content_block_stop",
-		"index": 0,
-	}
-	sendSSEEvent(w, flusher, "content_block_stop", contentBlockStop)
-
-	messageDelta := map[string]any{
-		"type": "message_delta",
-		"delta": map[string]any{
-			"stop_reason":   "end_turn",
-			"stop_sequence": nil,
-		},
-		"usage": map[string]any{
-			"output_tokens": outputTokens,
-		},
-	}
-	sendSSEEvent(w, flusher, "message_delta", messageDelta)
-
-	messageStop := map[string]any{
-		"type": "message_stop",
-	}
-	sendSSEEvent(w, flusher, "message_stop", messageStop)
 }
 
 // handleNonStreamRequest 处理非流式请求
@@ -643,7 +718,7 @@ func handleNonStreamRequest(w http.ResponseWriter, anthropicReq AnthropicRequest
 		return
 	}
 
-	fmt.Printf("CodeWhisperer 请求体:\n%s\n", string(cwReqBody))
+	// fmt.Printf("CodeWhisperer 请求体:\n%s\n", string(cwReqBody))
 
 	// 创建请求
 	proxyReq, err := http.NewRequest(
@@ -685,24 +760,98 @@ func handleNonStreamRequest(w http.ResponseWriter, anthropicReq AnthropicRequest
 		return
 	}
 
-	fmt.Printf("CodeWhisperer 响应体:\n%s\n", string(cwRespBody))
+	// fmt.Printf("CodeWhisperer 响应体:\n%s\n", string(cwRespBody))
+
+	respBodyStr := string(cwRespBody)
+
+	events := parser.ParseEvents(cwRespBody)
+
+	context := ""
+	toolName := ""
+	toolUseId := ""
+
+	contexts := []map[string]any{}
+
+	partialJsonStr := ""
+	for _, event := range events {
+		if event.Data != nil {
+			if dataMap, ok := event.Data.(map[string]any); ok {
+				switch dataMap["type"] {
+				case "content_block_start":
+					context = ""
+				case "content_block_delta":
+					if delta, ok := dataMap["delta"]; ok {
+
+						if deltaMap, ok := delta.(map[string]any); ok {
+							switch deltaMap["type"] {
+							case "text_delta":
+								if text, ok := deltaMap["text"]; ok {
+									context += text.(string)
+								}
+							case "input_json_delta":
+								toolUseId = deltaMap["id"].(string)
+								toolName = deltaMap["name"].(string)
+								if partial_json, ok := deltaMap["partial_json"]; ok {
+									if strPtr, ok := partial_json.(*string); ok && strPtr != nil {
+										partialJsonStr = partialJsonStr + *strPtr
+									} else if str, ok := partial_json.(string); ok {
+										partialJsonStr = partialJsonStr + str
+									} else {
+										log.Println("partial_json is not string or *string")
+									}
+								} else {
+									log.Println("partial_json not found")
+								}
+
+							}
+						}
+					}
+
+				case "content_block_stop":
+					if index, ok := dataMap["index"]; ok {
+						switch index {
+						case 1:
+							toolInput := map[string]interface{}{}
+							if err := json.Unmarshal([]byte(partialJsonStr), &toolInput); err != nil {
+								log.Printf("json unmarshal error:%s", err.Error())
+							}
+
+							contexts = append(contexts, map[string]interface{}{
+								"type":  "tool_use",
+								"id":    toolUseId,
+								"name":  toolName,
+								"input": toolInput,
+							})
+						case 0:
+							contexts = append(contexts, map[string]interface{}{
+								"text": context,
+								"type": "text",
+							})
+						}
+					}
+				}
+
+			}
+		}
+	}
+	// 检查是否是错误响应
+	if strings.Contains(string(cwRespBody), "Improperly formed request.") {
+		fmt.Printf("错误: CodeWhisperer返回格式错误: %s\n", respBodyStr)
+		http.Error(w, fmt.Sprintf("请求格式错误: %s", respBodyStr), http.StatusBadRequest)
+		return
+	}
 
 	// 构建 Anthropic 响应
 	anthropicResp := map[string]any{
-		"content": []map[string]any{
-			{
-				"text": string(cwRespBody),
-				"type": "text",
-			},
-		},
+		"content":       contexts,
 		"model":         anthropicReq.Model,
 		"role":          "assistant",
 		"stop_reason":   "end_turn",
 		"stop_sequence": nil,
 		"type":          "message",
 		"usage": map[string]any{
-			"input_tokens":  0,
-			"output_tokens": 0,
+			"input_tokens":  len(cwReq.ConversationState.CurrentMessage.UserInputMessage.Content),
+			"output_tokens": len(context),
 		},
 	}
 
@@ -711,76 +860,21 @@ func handleNonStreamRequest(w http.ResponseWriter, anthropicReq AnthropicRequest
 	json.NewEncoder(w).Encode(anthropicResp)
 }
 
-// buildCodeWhispererRequest 构建 CodeWhisperer 请求
-func buildCodeWhispererRequest(anthropicReq AnthropicRequest) CodeWhispererRequest {
-	cwReq := CodeWhispererRequest{
-		ProfileArn: "arn:aws:codewhisperer:us-east-1:699475941385:profile/EHGA3GRVQMUK",
-	}
-	cwReq.ConversationState.ChatTriggerType = "MANUAL"
-	cwReq.ConversationState.ConversationId = generateUUID()
-	cwReq.ConversationState.CurrentMessage.UserInputMessage.Content = getMessageContent(anthropicReq.Messages[len(anthropicReq.Messages)-1].Content)
-	cwReq.ConversationState.CurrentMessage.UserInputMessage.ModelId = ModelMap[anthropicReq.Model]
-	cwReq.ConversationState.CurrentMessage.UserInputMessage.Origin = "AI_EDITOR"
-	cwReq.ConversationState.CurrentMessage.UserInputMessage.UserInputMessageContext = make(map[string]any)
-
-	// 构建历史消息
-	if len(anthropicReq.Messages) > 1 {
-		history := make([]struct {
-			UserInputMessage struct {
-				Content string `json:"content"`
-				ModelId string `json:"modelId"`
-				Origin  string `json:"origin"`
-			} `json:"userInputMessage,omitempty"`
-			AssistantResponseMessage struct {
-				Content  string `json:"content"`
-				ToolUses []any  `json:"toolUses"`
-			} `json:"assistantResponseMessage,omitempty"`
-		}, 0)
-
-		for i := 0; i < len(anthropicReq.Messages)-1; i += 2 {
-			var historyItem struct {
-				UserInputMessage struct {
-					Content string `json:"content"`
-					ModelId string `json:"modelId"`
-					Origin  string `json:"origin"`
-				} `json:"userInputMessage,omitempty"`
-				AssistantResponseMessage struct {
-					Content  string `json:"content"`
-					ToolUses []any  `json:"toolUses"`
-				} `json:"assistantResponseMessage,omitempty"`
-			}
-
-			if anthropicReq.Messages[i].Role == "user" {
-				historyItem.UserInputMessage.Content = getMessageContent(anthropicReq.Messages[i].Content)
-				historyItem.UserInputMessage.ModelId = ModelMap[anthropicReq.Model]
-				historyItem.UserInputMessage.Origin = "AI_EDITOR"
-
-				if i+1 < len(anthropicReq.Messages)-1 && anthropicReq.Messages[i+1].Role == "assistant" {
-					historyItem.AssistantResponseMessage.Content = getMessageContent(anthropicReq.Messages[i+1].Content)
-					historyItem.AssistantResponseMessage.ToolUses = make([]any, 0)
-				}
-
-				history = append(history, historyItem)
-			}
-		}
-
-		cwReq.ConversationState.History = history
-	}
-
-	return cwReq
-}
-
 // sendSSEEvent 发送 SSE 事件
 func sendSSEEvent(w http.ResponseWriter, flusher http.Flusher, eventType string, data any) {
-	dataBytes, err := json.Marshal(data)
+
+	json, err := json.Marshal(data)
 	if err != nil {
-		fmt.Printf("错误: 序列化事件数据失败: %v\n", err)
 		return
 	}
 
+	fmt.Printf("event: %s\n", eventType)
+	fmt.Printf("data: %v\n\n", string(json))
+
 	fmt.Fprintf(w, "event: %s\n", eventType)
-	fmt.Fprintf(w, "data: %s\n\n", string(dataBytes))
+	fmt.Fprintf(w, "data: %s\n\n", string(json))
 	flusher.Flush()
+
 }
 
 // sendErrorEvent 发送错误事件
@@ -788,9 +882,12 @@ func sendErrorEvent(w http.ResponseWriter, flusher http.Flusher, message string,
 	errorResp := map[string]any{
 		"type": "error",
 		"error": map[string]any{
-			"type":    "server_error",
-			"message": fmt.Sprintf("%s: %v", message, err),
+			"type":    "overloaded_error",
+			"message": message,
 		},
 	}
+
+	// data: {"type": "error", "error": {"type": "overloaded_error", "message": "Overloaded"}}
+
 	sendSSEEvent(w, flusher, "error", errorResp)
 }
