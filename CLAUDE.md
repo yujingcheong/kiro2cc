@@ -6,6 +6,22 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 This is a Go CLI tool called `kiro2cc` that manages Kiro authentication tokens and provides an Anthropic API proxy service. The tool acts as a bridge between Anthropic API requests and AWS CodeWhisperer, translating requests and responses between the two formats.
 
+## Quick Start Guide
+
+### Prerequisites
+1. Install and login to Kiro desktop application from [kiro.dev](https://kiro.dev)
+2. Use Kiro AI features at least once to generate authentication tokens
+3. Ensure Go 1.23+ is installed (if building from source)
+
+### Getting Started
+1. **Download**: Get the latest release from GitHub releases page
+2. **Verify tokens**: `./kiro2cc read` to check if Kiro tokens exist
+3. **Refresh if needed**: `./kiro2cc refresh` to update expired tokens  
+4. **Start server**: `./kiro2cc server` to run the proxy on port 8080
+5. **Test**: Send requests to `http://localhost:8080/v1/messages`
+
+For detailed instructions, see the main README.md file.
+
 ## Build and Development Commands
 
 ```bash
